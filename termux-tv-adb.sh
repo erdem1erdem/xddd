@@ -279,6 +279,33 @@ play_youtube() {
   pause
 }
 
+volume_mute() {
+  ensure_target || { pause; return; }
+  cyan "Ses kapatılıyor..."
+  if adb -s "$TARGET" shell media volume --stream 3 --set 0 >/dev/null 2>&1; then
+    green "Ses kapatıldı (mute)."
+  else
+    adb -s "$TARGET" shell input keyevent 164 >/dev/null 2>&1
+    green "Mute tuşu gönderildi."
+  fi
+  pause
+}
+
+volume_max() {
+  ensure_target || { pause; return; }
+  cyan "Ses maksimuma alınıyor..."
+  if adb -s "$TARGET" shell media volume --stream 3 --set 15 >/dev/null 2>&1; then
+    green "Ses tam ses (15/15)."
+  else
+    local i
+    for i in $(seq 1 30); do
+      adb -s "$TARGET" shell input keyevent 24 >/dev/null 2>&1
+    done
+    green "Ses yükseltme tuşları gönderildi."
+  fi
+  pause
+}
+
 reboot_device() {
   ensure_target || { pause; return; }
   read -r -p "TV yeniden başlatılsın mı? [e/H]: " a
@@ -332,9 +359,11 @@ main_menu() {
     echo " 9) APK yükle"
     echo "10) Dosya gönder (push)"
     echo "11) YouTube linki oynat"
-    echo "12) Yeniden başlat (reboot)"
-    echo "13) TV'de TCP ADB açma ipuçları"
-    echo "14) Bağlantıyı kes"
+    echo "12) Ses: mute"
+    echo "13) Ses: tam ses"
+    echo "14) Yeniden başlat (reboot)"
+    echo "15) TV'de TCP ADB açma ipuçları"
+    echo "16) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -350,9 +379,11 @@ main_menu() {
       9) install_apk ;;
       10) push_file ;;
       11) play_youtube ;;
-      12) reboot_device ;;
-      13) enable_tcp_hint ;;
-      14) disconnect_all ;;
+      12) volume_mute ;;
+      13) volume_max ;;
+      14) reboot_device ;;
+      15) enable_tcp_hint ;;
+      16) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
