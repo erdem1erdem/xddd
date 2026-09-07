@@ -306,6 +306,96 @@ volume_max() {
   pause
 }
 
+guess_audio_mime() {
+  local f ext
+  f=$(basename "$1" | tr '[:upper:]' '[:lower:]')
+  ext="${f##*.}"
+  case "$ext" in
+    mp3) echo "audio/mpeg" ;;
+    m4a|aac) echo "audio/mp4" ;;
+    ogg|opus) echo "audio/ogg" ;;
+    wav) echo "audio/wav" ;;
+    flac) echo "audio/flac" ;;
+    *) echo "audio/*" ;;
+  esac
+}
+
+send_home_for_bg() {
+  # Bazı oynatıcılar Home sonrası arka planda devam eder
+  sleep 2
+  adb -s "$TARGET" shell input keyevent 3 >/dev/null 2>&1
+}
+
+play_audio_bg() {
+  ensure_target || { pause; return; }
+  echo
+  echo " 1) URL ile çal (mp3/stream http/https)"
+  echo " 2) Termux'taki ses dosyasını gönder ve çal"
+  echo " 0) İptal"
+  read -r -p "Seçim: " mode
+
+  local url mime remote name
+  case "$mode" in
+    1)
+      read -r -p "Ses URL: " url
+      url="${url//[[:space:]]/}"
+      [[ -z "$url" ]] && { red "URL boş."; pause; return; }
+      [[ "$url" != http://* && "$url" != https://* ]] && url="https://${url}"
+      mime=$(guess_audio_mime "$url")
+      cyan "Çalınıyor (arka plan denemesi): $url"
+      adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" -t "$mime" >/dev/null 2>&1 \
+        || adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+      send_home_for_bg
+      green "Başlatıldı. Home gönderildi (arka plan için)."
+      yellow "Not: Bazı TV uygulamaları arka planda susturur; VLC/müzik uygulaması daha iyi çalışır."
+      ;;
+    2)
+      read -r -p "Termux dosya yolu: " url
+      [[ -z "$url" || ! -f "$url" ]] && { red "Dosya bulunamadı."; pause; return; }
+      name=$(basename "$url")
+      remote="/sdcard/tv-adb-audio"
+      mime=$(guess_audio_mime "$name")
+      cyan "Dosya TV'ye gönderiliyor..."
+      adb -s "$TARGET" shell mkdir -p "$remote" >/dev/null 2>&1
+      adb -s "$TARGET" push "$url" "${remote}/${name}" || { red "Push başarısız."; pause; return; }
+      cyan "Oynatılıyor..."
+      if adb -s "$TARGET" shell pm path org.videolan.vlc >/dev/null 2>&1; then
+        adb -s "$TARGET" shell am start -a android.intent.action.VIEW \
+          -d "file://${remote}/${name}" -t "$mime" org.videolan.vlc >/dev/null 2>&1
+      else
+        adb -s "$TARGET" shell am start -a android.intent.action.VIEW \
+          -d "file://${remote}/${name}" -t "$mime" >/dev/null 2>&1
+      fi
+      send_home_for_bg
+      green "Dosya çalınıyor (Home ile arka plan denendi): ${name}"
+      ;;
+    *) return ;;
+  esac
+  pause
+}
+
+stop_audio() {
+  ensure_target || { pause; return; }
+  cyan "Medya durduruluyor..."
+  # Pause / stop keyevents
+  adb -s "$TARGET" shell input keyevent 127 >/dev/null 2>&1  # PAUSE
+  adb -s "$TARGET" shell input keyevent 86 >/dev/null 2>&1   # STOP
+  # Yaygın oynatıcıları kapat
+  for pkg in \
+    org.videolan.vlc \
+    com.google.android.youtube.tv \
+    com.google.android.youtube \
+    com.android.music \
+    com.google.android.apps.youtube.music \
+    com.spotify.tv.android \
+    com.teamsmart.videomanager.tv
+  do
+    adb -s "$TARGET" shell am force-stop "$pkg" >/dev/null 2>&1
+  done
+  green "Durdurma komutları gönderildi."
+  pause
+}
+
 reboot_device() {
   ensure_target || { pause; return; }
   read -r -p "TV yeniden başlatılsın mı? [e/H]: " a
@@ -361,9 +451,11 @@ main_menu() {
     echo "11) YouTube linki oynat"
     echo "12) Ses: mute"
     echo "13) Ses: tam ses"
-    echo "14) Yeniden başlat (reboot)"
-    echo "15) TV'de TCP ADB açma ipuçları"
-    echo "16) Bağlantıyı kes"
+    echo "14) Arka planda ses çal"
+    echo "15) Sesi / medyayı durdur"
+    echo "16) Yeniden başlat (reboot)"
+    echo "17) TV'de TCP ADB açma ipuçları"
+    echo "18) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -381,9 +473,11 @@ main_menu() {
       11) play_youtube ;;
       12) volume_mute ;;
       13) volume_max ;;
-      14) reboot_device ;;
-      15) enable_tcp_hint ;;
-      16) disconnect_all ;;
+      14) play_audio_bg ;;
+      15) stop_audio ;;
+      16) reboot_device ;;
+      17) enable_tcp_hint ;;
+      18) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
