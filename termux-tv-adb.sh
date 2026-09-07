@@ -522,7 +522,7 @@ echo "RESTORED=$count"
 }
 
 prank_home_rain() {
-  ensure_target || { pause; return; }
+  ensure_target || return 1
   cyan "Home yagmuru basliyor..."
   local i
   for i in $(seq 1 15); do
@@ -530,11 +530,10 @@ prank_home_rain() {
     sleep 0.12
   done
   green "Bitti. Ana ekran islandi."
-  pause
 }
 
 prank_cat_walk() {
-  ensure_target || { pause; return; }
+  ensure_target || return 1
   cyan "Bir kedi kumandaya oturdu..."
   local keys=(19 20 21 22 23 4 3)
   local i idx
@@ -544,11 +543,10 @@ prank_cat_walk() {
     sleep 0.07
   done
   green "Kedi indirdi. Sanirim."
-  pause
 }
 
 prank_app_roulette() {
-  ensure_target || { pause; return; }
+  ensure_target || return 1
   cyan "Uygulama carki donuyor..."
   local pkgs=() pkg
   mapfile -t pkgs < <(adb -s "$TARGET" shell pm list packages -3 2>/dev/null \
@@ -561,8 +559,7 @@ prank_app_roulette() {
   fi
   if ((${#pkgs[@]} < 1)); then
     red "Acilacak uygulama bulunamadi."
-    pause
-    return
+    return 1
   fi
   pkg="${pkgs[$((RANDOM % ${#pkgs[@]}))]}"
   yellow "Secilen paket: $pkg"
@@ -570,7 +567,173 @@ prank_app_roulette() {
     adb -s "$TARGET" shell monkey -p "$pkg" 1 >/dev/null 2>&1 || true
   fi
   green "Rulet bitti. Bol sans."
-  pause
+}
+
+prank_disco_volume() {
+  ensure_target || return 1
+  cyan "Disco ses modu (8 sn)..."
+  local i
+  for i in $(seq 1 16); do
+    if ((i % 2 == 0)); then
+      adb -s "$TARGET" shell media volume --stream 3 --set 0 >/dev/null 2>&1 \
+        || adb -s "$TARGET" shell input keyevent 164 >/dev/null 2>&1
+    else
+      adb -s "$TARGET" shell media volume --stream 3 --set 15 >/dev/null 2>&1 \
+        || adb -s "$TARGET" shell input keyevent 24 >/dev/null 2>&1
+    fi
+    sleep 0.45
+  done
+  green "DJ kabini kapandi."
+}
+
+prank_movie_sabotage() {
+  ensure_target || return 1
+  cyan "Film sabotaji basladi..."
+  local i ev
+  local events=(85 85 87 88 89 90 86)
+  for i in $(seq 1 12); do
+    ev=${events[$((RANDOM % ${#events[@]}))]}
+    adb -s "$TARGET" shell input keyevent "$ev" >/dev/null 2>&1
+    sleep 0.35
+  done
+  green "Izleyen kisiyi tebrik ederiz."
+}
+
+prank_fake_notify() {
+  ensure_target || return 1
+  local titles=(
+    "Guvenlik Uyarisi"
+    "Sistem"
+    "Kumanda Mahkemesi"
+    "Komsu Raporu"
+    "Gizli Servis"
+  )
+  local bodies=(
+    "Birisi seni izlerken izliyor."
+    "Kumanda ifadeye cagrildi."
+    "Bu TV cok fazla dizi izledi."
+    "Test basarisiz: fazla ciddiye alindi."
+    "Kedi tekrar baglandi."
+    "Wi-Fi sizi muhbir olarak isaretledi."
+  )
+  local t b
+  t="${titles[$((RANDOM % ${#titles[@]}))]}"
+  b="${bodies[$((RANDOM % ${#bodies[@]}))]}"
+  cyan "Sahte bildirim: $t"
+  adb -s "$TARGET" shell cmd notification post -t "$t" tvprank "$b" >/dev/null 2>&1 \
+    || adb -s "$TARGET" shell "am start -a android.intent.action.MAIN -e message '$b'" >/dev/null 2>&1 \
+    || yellow "Bildirim API yok; metin yine de secildi."
+  green "Gonderildi (destekleyen kutularda gorunur)."
+}
+
+prank_anim_chaos() {
+  ensure_target || return 1
+  echo
+  echo " 1) Cok yavas UI (salyangoz)"
+  echo " 2) Cok hizli UI (kahve sonrasi)"
+  echo " 3) Normaline dondur"
+  read -r -p "Seçim: " m
+  local val=1
+  case "$m" in
+    1) val=5; cyan "Salyangoz modu..." ;;
+    2) val=0.2; cyan "Hizli UI..." ;;
+    3) val=1; cyan "Normal..." ;;
+    *) return ;;
+  esac
+  adb -s "$TARGET" shell settings put global window_animation_scale "$val" >/dev/null 2>&1
+  adb -s "$TARGET" shell settings put global transition_animation_scale "$val" >/dev/null 2>&1
+  adb -s "$TARGET" shell settings put global animator_duration_scale "$val" >/dev/null 2>&1
+  green "Animasyon ayari uygulandi (reboot yok)."
+}
+
+prank_brightness_flash() {
+  ensure_target || return 1
+  cyan "Parlaklik sokagi..."
+  local old
+  old=$(adb -s "$TARGET" shell settings get system screen_brightness 2>/dev/null | tr -d '\r')
+  [[ "$old" =~ ^[0-9]+$ ]] || old=100
+  adb -s "$TARGET" shell settings put system screen_brightness 1 >/dev/null 2>&1
+  sleep 1.5
+  adb -s "$TARGET" shell settings put system screen_brightness "$old" >/dev/null 2>&1
+  green "Isiklar geri geldi."
+}
+
+prank_back_rain() {
+  ensure_target || return 1
+  cyan "Geri tus yagmuru..."
+  local i
+  for i in $(seq 1 12); do
+    adb -s "$TARGET" shell input keyevent 4 >/dev/null 2>&1
+    sleep 0.12
+  done
+  green "Neredeyiz? Kimse bilmiyor."
+}
+
+prank_settings_trap() {
+  ensure_target || return 1
+  cyan "Ayarlar tuzagi..."
+  adb -s "$TARGET" shell am start -a android.settings.SETTINGS >/dev/null 2>&1 \
+    || adb -s "$TARGET" shell am start -n com.android.tv.settings/.MainSettings >/dev/null 2>&1 \
+    || adb -s "$TARGET" shell monkey -p com.android.tv.settings 1 >/dev/null 2>&1
+  sleep 0.8
+  adb -s "$TARGET" shell input keyevent 20 >/dev/null 2>&1
+  adb -s "$TARGET" shell input keyevent 20 >/dev/null 2>&1
+  green "Haydi ayarlardan ciksinlar."
+}
+
+prank_surprise() {
+  ensure_target || return 1
+  cyan "Surpriz paket hazirlaniyor..."
+  local pick=$((RANDOM % 5))
+  case "$pick" in
+    0) prank_home_rain; sleep 0.3; prank_disco_volume ;;
+    1) prank_cat_walk; sleep 0.3; prank_fake_notify ;;
+    2) prank_movie_sabotage; sleep 0.3; prank_back_rain ;;
+    3) prank_app_roulette; sleep 0.3; prank_brightness_flash ;;
+    4) prank_disco_volume; sleep 0.3; prank_settings_trap ;;
+  esac
+  green "Surpriz tamam. Tesekkurler, kurban."
+}
+
+prank_menu() {
+  ensure_target || { pause; return; }
+  while true; do
+    clear 2>/dev/null || true
+    cyan "======================================"
+    cyan "   SAKA / TEST EGLENCE MENUSU"
+    cyan "======================================"
+    echo " Hedef: $(current_target)"
+    echo
+    echo " 1) Home yagmuru"
+    echo " 2) Kedi yurudu"
+    echo " 3) Rastgele uygulama ruleti"
+    echo " 4) Disco ses"
+    echo " 5) Film sabotaji"
+    echo " 6) Sahte bildirim"
+    echo " 7) Animasyon cilginligi"
+    echo " 8) Parlaklik sokagi"
+    echo " 9) Geri tus yagmuru"
+    echo "10) Ayarlar tuzagi"
+    echo "11) SURPRIZ PAKET (rastgele kombo)"
+    echo " 0) Ana menuye don"
+    echo
+    read -r -p "Seçim: " p
+    case "$p" in
+      1) prank_home_rain; pause ;;
+      2) prank_cat_walk; pause ;;
+      3) prank_app_roulette; pause ;;
+      4) prank_disco_volume; pause ;;
+      5) prank_movie_sabotage; pause ;;
+      6) prank_fake_notify; pause ;;
+      7) prank_anim_chaos; pause ;;
+      8) prank_brightness_flash; pause ;;
+      9) prank_back_rain; pause ;;
+      10) prank_settings_trap; pause ;;
+      11) prank_surprise; pause ;;
+      0) return ;;
+      *) red "Geçersiz seçim."; sleep 1 ;;
+    esac
+  done
 }
 
 reboot_device() {
@@ -632,12 +795,10 @@ main_menu() {
     echo "15) Sesi / medyayı durdur"
     echo "16) Ters kumanda AÇ (fiziksel, root)"
     echo "17) Ters kumanda KAPAT (geri al)"
-    echo "18) Home yagmuru"
-    echo "19) Rastgele uygulama ruleti"
-    echo "20) Kedi yurudu"
-    echo "21) Yeniden başlat (reboot)"
-    echo "22) TV'de TCP ADB açma ipuçları"
-    echo "23) Bağlantıyı kes"
+    echo "18) Saka / test eglence menusu"
+    echo "19) Yeniden başlat (reboot)"
+    echo "20) TV'de TCP ADB açma ipuçları"
+    echo "21) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -659,12 +820,10 @@ main_menu() {
       15) stop_audio ;;
       16) reverse_remote_apply ;;
       17) reverse_remote_restore ;;
-      18) prank_home_rain ;;
-      19) prank_app_roulette ;;
-      20) prank_cat_walk ;;
-      21) reboot_device ;;
-      22) enable_tcp_hint ;;
-      23) disconnect_all ;;
+      18) prank_menu ;;
+      19) reboot_device ;;
+      20) enable_tcp_hint ;;
+      21) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
