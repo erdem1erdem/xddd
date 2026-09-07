@@ -715,6 +715,8 @@ prank_menu() {
     echo " 9) Geri tus yagmuru"
     echo "10) Ayarlar tuzagi"
     echo "11) SURPRIZ PAKET (rastgele kombo)"
+    echo "12) Wi-Fi KAPAT"
+    echo "13) Wi-Fi AC"
     echo " 0) Ana menuye don"
     echo
     read -r -p "Seçim: " p
@@ -730,10 +732,43 @@ prank_menu() {
       9) prank_back_rain; pause ;;
       10) prank_settings_trap; pause ;;
       11) prank_surprise; pause ;;
+      12) wifi_disable; pause ;;
+      13) wifi_enable; pause ;;
       0) return ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
   done
+}
+
+wifi_disable() {
+  ensure_target || return 1
+  yellow "DIKKAT: ADB Wi-Fi uzerinden bagliysa baglanti KOPAR."
+  read -r -p "Wi-Fi kapatilsin mi? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
+  cyan "Wi-Fi kapatiliyor..."
+  if adb -s "$TARGET" shell svc wifi disable >/dev/null 2>&1; then
+    green "Wi-Fi kapatma komutu gonderildi."
+  elif adb -s "$TARGET" shell cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
+    green "Wi-Fi kapatildi (cmd wifi)."
+  elif adb -s "$TARGET" shell su -c 'svc wifi disable' >/dev/null 2>&1; then
+    green "Wi-Fi kapatildi (root)."
+  else
+    red "Kapatilamadi. Cihaz bu komutu engelliyor olabilir."
+  fi
+}
+
+wifi_enable() {
+  ensure_target || return 1
+  cyan "Wi-Fi aciliyor..."
+  if adb -s "$TARGET" shell svc wifi enable >/dev/null 2>&1; then
+    green "Wi-Fi acma komutu gonderildi."
+  elif adb -s "$TARGET" shell cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
+    green "Wi-Fi acildi (cmd wifi)."
+  elif adb -s "$TARGET" shell su -c 'svc wifi enable' >/dev/null 2>&1; then
+    green "Wi-Fi acildi (root)."
+  else
+    red "Acilamadi. USB ADB veya TV uzerinden elle acman gerekebilir."
+  fi
 }
 
 reboot_device() {
@@ -796,9 +831,11 @@ main_menu() {
     echo "16) Ters kumanda AÇ (fiziksel, root)"
     echo "17) Ters kumanda KAPAT (geri al)"
     echo "18) Saka / test eglence menusu"
-    echo "19) Yeniden başlat (reboot)"
-    echo "20) TV'de TCP ADB açma ipuçları"
-    echo "21) Bağlantıyı kes"
+    echo "19) Wi-Fi kapat"
+    echo "20) Wi-Fi ac"
+    echo "21) Yeniden başlat (reboot)"
+    echo "22) TV'de TCP ADB açma ipuçları"
+    echo "23) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -821,9 +858,11 @@ main_menu() {
       16) reverse_remote_apply ;;
       17) reverse_remote_restore ;;
       18) prank_menu ;;
-      19) reboot_device ;;
-      20) enable_tcp_hint ;;
-      21) disconnect_all ;;
+      19) wifi_disable; pause ;;
+      20) wifi_enable; pause ;;
+      21) reboot_device ;;
+      22) enable_tcp_hint ;;
+      23) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
