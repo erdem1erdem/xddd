@@ -496,7 +496,7 @@ for dir in /system/usr/keylayout /vendor/usr/keylayout /system_ext/usr/keylayout
     f="${bak%.tvadb.bak}"
     cp "$bak" "$f"
     rm -f "$bak"
-    echo "RESTRED: $f"
+    echo "RESTORED: $f"
     count=$((count+1))
   done
 done
@@ -518,6 +518,58 @@ echo "RESTORED=$count"
     adb -s "$TARGET" reboot
     yellow "Reboot gönderildi. Yönler normale dönmeli."
   fi
+  pause
+}
+
+prank_home_rain() {
+  ensure_target || { pause; return; }
+  cyan "Home yagmuru basliyor..."
+  local i
+  for i in $(seq 1 15); do
+    adb -s "$TARGET" shell input keyevent 3 >/dev/null 2>&1
+    sleep 0.12
+  done
+  green "Bitti. Ana ekran islandi."
+  pause
+}
+
+prank_cat_walk() {
+  ensure_target || { pause; return; }
+  cyan "Bir kedi kumandaya oturdu..."
+  local keys=(19 20 21 22 23 4 3)
+  local i idx
+  for i in $(seq 1 45); do
+    idx=$((RANDOM % ${#keys[@]}))
+    adb -s "$TARGET" shell input keyevent "${keys[$idx]}" >/dev/null 2>&1
+    sleep 0.07
+  done
+  green "Kedi indirdi. Sanirim."
+  pause
+}
+
+prank_app_roulette() {
+  ensure_target || { pause; return; }
+  cyan "Uygulama carki donuyor..."
+  local pkgs=() pkg
+  mapfile -t pkgs < <(adb -s "$TARGET" shell pm list packages -3 2>/dev/null \
+    | sed 's/\r//g; s/^package://' \
+    | grep -vE '^(com\.android\.shell|com\.android\.systemui)$' || true)
+  if ((${#pkgs[@]} < 1)); then
+    mapfile -t pkgs < <(adb -s "$TARGET" shell pm list packages 2>/dev/null \
+      | sed 's/\r//g; s/^package://' \
+      | grep -vE '^(android|com\.android\.(shell|systemui|providers\.)|com\.google\.android\.(gms|gsf|gsf\.login))' || true)
+  fi
+  if ((${#pkgs[@]} < 1)); then
+    red "Acilacak uygulama bulunamadi."
+    pause
+    return
+  fi
+  pkg="${pkgs[$((RANDOM % ${#pkgs[@]}))]}"
+  yellow "Secilen paket: $pkg"
+  if ! adb -s "$TARGET" shell monkey -p "$pkg" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; then
+    adb -s "$TARGET" shell monkey -p "$pkg" 1 >/dev/null 2>&1 || true
+  fi
+  green "Rulet bitti. Bol sans."
   pause
 }
 
@@ -580,9 +632,12 @@ main_menu() {
     echo "15) Sesi / medyayı durdur"
     echo "16) Ters kumanda AÇ (fiziksel, root)"
     echo "17) Ters kumanda KAPAT (geri al)"
-    echo "18) Yeniden başlat (reboot)"
-    echo "19) TV'de TCP ADB açma ipuçları"
-    echo "20) Bağlantıyı kes"
+    echo "18) Home yagmuru"
+    echo "19) Rastgele uygulama ruleti"
+    echo "20) Kedi yurudu"
+    echo "21) Yeniden başlat (reboot)"
+    echo "22) TV'de TCP ADB açma ipuçları"
+    echo "23) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -604,9 +659,12 @@ main_menu() {
       15) stop_audio ;;
       16) reverse_remote_apply ;;
       17) reverse_remote_restore ;;
-      18) reboot_device ;;
-      19) enable_tcp_hint ;;
-      20) disconnect_all ;;
+      18) prank_home_rain ;;
+      19) prank_app_roulette ;;
+      20) prank_cat_walk ;;
+      21) reboot_device ;;
+      22) enable_tcp_hint ;;
+      23) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
