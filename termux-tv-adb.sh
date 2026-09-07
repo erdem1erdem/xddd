@@ -230,6 +230,55 @@ push_file() {
   pause
 }
 
+play_youtube() {
+  ensure_target || { pause; return; }
+  local url vid
+  echo
+  read -r -p "YouTube linki (veya video ID): " url
+  url="${url//[[:space:]]/}"
+  [[ -z "$url" ]] && { red "Link boş olamaz."; pause; return; }
+
+  # Sadece video ID verildiyse linke çevir
+  if [[ "$url" =~ ^[A-Za-z0-9_-]{11}$ ]]; then
+    url="https://www.youtube.com/watch?v=${url}"
+  elif [[ "$url" != http://* && "$url" != https://* ]]; then
+    url="https://${url}"
+  fi
+
+  # youtu.be / watch?v= / shorts / embed içinden ID çıkar (mümkünse)
+  vid=""
+  if [[ "$url" =~ youtu\.be/([A-Za-z0-9_-]{11}) ]]; then
+    vid="${BASH_REMATCH[1]}"
+  elif [[ "$url" =~ [\?\&]v=([A-Za-z0-9_-]{11}) ]]; then
+    vid="${BASH_REMATCH[1]}"
+  elif [[ "$url" =~ /(shorts|embed|live)/([A-Za-z0-9_-]{11}) ]]; then
+    vid="${BASH_REMATCH[2]}"
+  fi
+  if [[ -n "$vid" ]]; then
+    url="https://www.youtube.com/watch?v=${vid}"
+  fi
+
+  cyan "TV'de açılıyor: $url"
+
+  # Önce YouTube TV / YouTube / SmartTube, yoksa genel VIEW
+  if adb -s "$TARGET" shell pm path com.google.android.youtube.tv >/dev/null 2>&1; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" com.google.android.youtube.tv >/dev/null
+  elif adb -s "$TARGET" shell pm path com.google.android.youtube >/dev/null 2>&1; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" com.google.android.youtube >/dev/null
+  elif adb -s "$TARGET" shell pm path com.teamsmart.videomanager.tv >/dev/null 2>&1; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" com.teamsmart.videomanager.tv >/dev/null
+  else
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" >/dev/null
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    green "Oynatma komutu gönderildi."
+  else
+    red "Açılamadı. YouTube uygulaması kurulu mu?"
+  fi
+  pause
+}
+
 reboot_device() {
   ensure_target || { pause; return; }
   read -r -p "TV yeniden başlatılsın mı? [e/H]: " a
@@ -282,9 +331,10 @@ main_menu() {
     echo " 8) Root ile özel komut"
     echo " 9) APK yükle"
     echo "10) Dosya gönder (push)"
-    echo "11) Yeniden başlat (reboot)"
-    echo "12) TV'de TCP ADB açma ipuçları"
-    echo "13) Bağlantıyı kes"
+    echo "11) YouTube linki oynat"
+    echo "12) Yeniden başlat (reboot)"
+    echo "13) TV'de TCP ADB açma ipuçları"
+    echo "14) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -299,9 +349,10 @@ main_menu() {
       8) run_root_custom ;;
       9) install_apk ;;
       10) push_file ;;
-      11) reboot_device ;;
-      12) enable_tcp_hint ;;
-      13) disconnect_all ;;
+      11) play_youtube ;;
+      12) reboot_device ;;
+      13) enable_tcp_hint ;;
+      14) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
