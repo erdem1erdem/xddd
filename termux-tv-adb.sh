@@ -396,62 +396,129 @@ stop_audio() {
   pause
 }
 
-send_key() {
-  adb -s "$TARGET" shell input keyevent "$1" >/dev/null 2>&1
-}
-
-reverse_remote() {
+# Fiziksel kumanda yönlerini keylayout üzerinden tersler (root + reboot gerekir)
+reverse_remote_apply() {
   ensure_target || { pause; return; }
-  clear 2>/dev/null || true
-  cyan "======================================"
-  cyan "   TERS KUMANDA MODU"
-  cyan "======================================"
-  yellow "Fiziksel kumanda değişmez; bu panelden kontrol ters!"
-  echo
-  echo "  W / ↑  →  TV'de AŞAĞI"
-  echo "  S / ↓  →  TV'de YUKARI"
-  echo "  A / ←  →  TV'de SAĞ"
-  echo "  D / →  →  TV'de SOL"
-  echo "  Enter / O / Boşluk  →  OK"
-  echo "  B  →  Geri"
-  echo "  H  →  Home"
-  echo "  M  →  Mute"
-  echo "  Q  →  Çıkış"
-  echo
-  green "Hazır. Tuşlara bas..."
-  # Uyarı niyetine Home'a kısa bildirim denemesi (yok sayılabilir)
-  adb -s "$TARGET" shell cmd notification post -t "Ters Kumanda" tvadb "Yukari artik asagi!" >/dev/null 2>&1 || true
+  yellow "Bu işlem TV'deki keylayout dosyalarını değiştirir (root)."
+  yellow "Yedek alınır; geri almak için menüden KAPAT kullan."
+  read -r -p "Ters kumandayı AÇmak için reboot dahil onaylıyor musun? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
 
-  local key rest
-  while true; do
-    IFS= read -rsn1 key || break
-    if [[ "$key" == $'\x1b' ]]; then
-      IFS= read -rsn2 -t 0.1 rest || rest=""
-      case "$rest" in
-        "[A") send_key 20; printf "↓ " ;;  # up arrow -> DOWN
-        "[B") send_key 19; printf "↑ " ;;  # down -> UP
-        "[C") send_key 21; printf "← " ;;  # right -> LEFT
-        "[D") send_key 22; printf "→ " ;;  # left -> RIGHT
-      esac
+  cyan "Keylayout tersleniyor..."
+  # shellcheck disable=SC2016
+  adb -s "$TARGET" shell su -c '
+set -e
+remount_rw() {
+  mount -o rw,remount /system 2>/dev/null || true
+  mount -o rw,remount /vendor 2>/dev/null || true
+  mount -o rw,remount / 2>/dev/null || true
+}
+swap_dirs() {
+  # DPAD_UP <-> DOWN, LEFT <-> RIGHT (geçici token ile)
+  sed -e "s/DPAD_UP/__TVADB_UP__/g" \
+      -e "s/DPAD_DOWN/DPAD_UP/g" \
+      -e "s/__TVADB_UP__/DPAD_DOWN/g" \
+      -e "s/DPAD_LEFT/__TVADB_LEFT__/g" \
+      -e "s/DPAD_RIGHT/DPAD_LEFT/g" \
+      -e "s/__TVADB_LEFT__/DPAD_RIGHT/g"
+}
+remount_rw
+count=0
+for dir in /system/usr/keylayout /vendor/usr/keylayout /system_ext/usr/keylayout /product/usr/keylayout; do
+  [ -d "$dir" ] || continue
+  for f in "$dir"/*.kl; do
+    [ -f "$f" ] || continue
+    grep -qE "DPAD_(UP|DOWN|LEFT|RIGHT)" "$f" || continue
+    # Zaten bizim yedeğimiz varsa tekrar bozma
+    if [ -f "${f}.tvadb.bak" ]; then
+      echo "SKIP (zaten yedekli): $f"
       continue
     fi
-    case "$key" in
-      w|W) send_key 20; printf "↓ " ;;          # DPAD_DOWN
-      s|S) send_key 19; printf "↑ " ;;          # DPAD_UP
-      a|A) send_key 22; printf "→ " ;;          # DPAD_RIGHT
-      d|D) send_key 21; printf "← " ;;          # DPAD_LEFT
-      o|O|" "|$'\n'|$'\r') send_key 23; printf "OK " ;; # DPAD_CENTER
-      b|B) send_key 4; printf "Geri " ;;       # BACK
-      h|H) send_key 3; printf "Home " ;;       # HOME
-      m|M) send_key 164; printf "Mute " ;;     # VOLUME_MUTE
-      q|Q)
-        echo
-        green "Ters kumanda kapatıldı."
-        pause
-        return
-        ;;
-    esac
+    cp "$f" "${f}.tvadb.bak" || continue
+    swap_dirs < "${f}.tvadb.bak" > "${f}.tvadb.tmp"
+    mv "${f}.tvadb.tmp" "$f"
+    echo "OK: $f"
+    count=$((count+1))
   done
+done
+echo "CHANGED=$count"
+if [ "$count" -eq 0 ]; then
+  echo "NO_FILES"
+  exit 2
+fi
+' > /tmp/tvadb-reverse-out.txt 2>&1
+  local rc=$?
+  cat /tmp/tvadb-reverse-out.txt 2>/dev/null || true
+
+  if grep -q "NO_FILES" /tmp/tvadb-reverse-out.txt 2>/dev/null; then
+    red "Uygun keylayout bulunamadı veya yazılamadı."
+    yellow "Root / system remount mümkün olmayabilir."
+    pause
+    return
+  fi
+  if [[ $rc -ne 0 ]] && ! grep -q "CHANGED=[1-9]" /tmp/tvadb-reverse-out.txt 2>/dev/null; then
+    red "İşlem başarısız (root/remount?)."
+    pause
+    return
+  fi
+
+  green "Ters mapping yazıldı. Kumandanın ters olması için reboot şart."
+  read -r -p "Şimdi reboot? [e/H]: " r
+  if [[ "$r" =~ ^[eEyY]$ ]]; then
+    adb -s "$TARGET" reboot
+    yellow "Reboot gönderildi. Açılınca yönler ters olmalı."
+  else
+    yellow "Reboot etmeden çoğu kutuda etki etmez."
+  fi
+  pause
+}
+
+reverse_remote_restore() {
+  ensure_target || { pause; return; }
+  yellow "Yedekten keylayout geri yüklenecek."
+  read -r -p "Ters kumandayı KAPATmak için reboot dahil onay? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
+
+  cyan "Yedekler geri yükleniyor..."
+  adb -s "$TARGET" shell su -c '
+set -e
+remount_rw() {
+  mount -o rw,remount /system 2>/dev/null || true
+  mount -o rw,remount /vendor 2>/dev/null || true
+  mount -o rw,remount / 2>/dev/null || true
+}
+remount_rw
+count=0
+for dir in /system/usr/keylayout /vendor/usr/keylayout /system_ext/usr/keylayout /product/usr/keylayout; do
+  [ -d "$dir" ] || continue
+  for bak in "$dir"/*.kl.tvadb.bak; do
+    [ -f "$bak" ] || continue
+    f="${bak%.tvadb.bak}"
+    cp "$bak" "$f"
+    rm -f "$bak"
+    echo "RESTRED: $f"
+    count=$((count+1))
+  done
+done
+echo "RESTORED=$count"
+[ "$count" -gt 0 ] || exit 2
+' > /tmp/tvadb-restore-out.txt 2>&1
+  local rc=$?
+  cat /tmp/tvadb-restore-out.txt 2>/dev/null || true
+
+  if [[ $rc -ne 0 ]]; then
+    red "Geri yükleme başarısız veya yedek yok."
+    pause
+    return
+  fi
+
+  green "Orijinal keylayout geri yüklendi."
+  read -r -p "Şimdi reboot? [e/H]: " r
+  if [[ "$r" =~ ^[eEyY]$ ]]; then
+    adb -s "$TARGET" reboot
+    yellow "Reboot gönderildi. Yönler normale dönmeli."
+  fi
+  pause
 }
 
 reboot_device() {
@@ -511,10 +578,11 @@ main_menu() {
     echo "13) Ses: tam ses"
     echo "14) Arka planda ses çal"
     echo "15) Sesi / medyayı durdur"
-    echo "16) Ters kumanda"
-    echo "17) Yeniden başlat (reboot)"
-    echo "18) TV'de TCP ADB açma ipuçları"
-    echo "19) Bağlantıyı kes"
+    echo "16) Ters kumanda AÇ (fiziksel, root)"
+    echo "17) Ters kumanda KAPAT (geri al)"
+    echo "18) Yeniden başlat (reboot)"
+    echo "19) TV'de TCP ADB açma ipuçları"
+    echo "20) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -534,10 +602,11 @@ main_menu() {
       13) volume_max ;;
       14) play_audio_bg ;;
       15) stop_audio ;;
-      16) reverse_remote ;;
-      17) reboot_device ;;
-      18) enable_tcp_hint ;;
-      19) disconnect_all ;;
+      16) reverse_remote_apply ;;
+      17) reverse_remote_restore ;;
+      18) reboot_device ;;
+      19) enable_tcp_hint ;;
+      20) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
