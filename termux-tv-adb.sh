@@ -396,6 +396,64 @@ stop_audio() {
   pause
 }
 
+send_key() {
+  adb -s "$TARGET" shell input keyevent "$1" >/dev/null 2>&1
+}
+
+reverse_remote() {
+  ensure_target || { pause; return; }
+  clear 2>/dev/null || true
+  cyan "======================================"
+  cyan "   TERS KUMANDA MODU"
+  cyan "======================================"
+  yellow "Fiziksel kumanda değişmez; bu panelden kontrol ters!"
+  echo
+  echo "  W / ↑  →  TV'de AŞAĞI"
+  echo "  S / ↓  →  TV'de YUKARI"
+  echo "  A / ←  →  TV'de SAĞ"
+  echo "  D / →  →  TV'de SOL"
+  echo "  Enter / O / Boşluk  →  OK"
+  echo "  B  →  Geri"
+  echo "  H  →  Home"
+  echo "  M  →  Mute"
+  echo "  Q  →  Çıkış"
+  echo
+  green "Hazır. Tuşlara bas..."
+  # Uyarı niyetine Home'a kısa bildirim denemesi (yok sayılabilir)
+  adb -s "$TARGET" shell cmd notification post -t "Ters Kumanda" tvadb "Yukari artik asagi!" >/dev/null 2>&1 || true
+
+  local key rest
+  while true; do
+    IFS= read -rsn1 key || break
+    if [[ "$key" == $'\x1b' ]]; then
+      IFS= read -rsn2 -t 0.1 rest || rest=""
+      case "$rest" in
+        "[A") send_key 20; printf "↓ " ;;  # up arrow -> DOWN
+        "[B") send_key 19; printf "↑ " ;;  # down -> UP
+        "[C") send_key 21; printf "← " ;;  # right -> LEFT
+        "[D") send_key 22; printf "→ " ;;  # left -> RIGHT
+      esac
+      continue
+    fi
+    case "$key" in
+      w|W) send_key 20; printf "↓ " ;;          # DPAD_DOWN
+      s|S) send_key 19; printf "↑ " ;;          # DPAD_UP
+      a|A) send_key 22; printf "→ " ;;          # DPAD_RIGHT
+      d|D) send_key 21; printf "← " ;;          # DPAD_LEFT
+      o|O|" "|$'\n'|$'\r') send_key 23; printf "OK " ;; # DPAD_CENTER
+      b|B) send_key 4; printf "Geri " ;;       # BACK
+      h|H) send_key 3; printf "Home " ;;       # HOME
+      m|M) send_key 164; printf "Mute " ;;     # VOLUME_MUTE
+      q|Q)
+        echo
+        green "Ters kumanda kapatıldı."
+        pause
+        return
+        ;;
+    esac
+  done
+}
+
 reboot_device() {
   ensure_target || { pause; return; }
   read -r -p "TV yeniden başlatılsın mı? [e/H]: " a
@@ -453,9 +511,10 @@ main_menu() {
     echo "13) Ses: tam ses"
     echo "14) Arka planda ses çal"
     echo "15) Sesi / medyayı durdur"
-    echo "16) Yeniden başlat (reboot)"
-    echo "17) TV'de TCP ADB açma ipuçları"
-    echo "18) Bağlantıyı kes"
+    echo "16) Ters kumanda"
+    echo "17) Yeniden başlat (reboot)"
+    echo "18) TV'de TCP ADB açma ipuçları"
+    echo "19) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -475,9 +534,10 @@ main_menu() {
       13) volume_max ;;
       14) play_audio_bg ;;
       15) stop_audio ;;
-      16) reboot_device ;;
-      17) enable_tcp_hint ;;
-      18) disconnect_all ;;
+      16) reverse_remote ;;
+      17) reboot_device ;;
+      18) enable_tcp_hint ;;
+      19) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
