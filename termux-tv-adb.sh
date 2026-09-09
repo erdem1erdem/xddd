@@ -6,6 +6,9 @@
 set -u
 CONFIG_DIR="${HOME}/.config/tv-adb"
 CONFIG_FILE="${CONFIG_DIR}/last_device"
+PC_CONFIG="${CONFIG_DIR}/last_pc"
+PC_MAC_CONFIG="${CONFIG_DIR}/last_pc_mac"
+PC_USER_CONFIG="${CONFIG_DIR}/last_pc_user"
 DEFAULT_PORT=5555
 
 mkdir -p "$CONFIG_DIR"
@@ -31,6 +34,9 @@ install_deps() {
   need_cmd nmap || pkgs+=(nmap)
   need_cmd nc   || pkgs+=(netcat-openbsd)
   need_cmd ip   || pkgs+=(iproute2)
+  need_cmd ssh  || pkgs+=(openssh)
+  need_cmd ping || pkgs+=(inetutils)
+  need_cmd smbclient || pkgs+=(samba)
 
   if ((${#pkgs[@]})); then
     yellow "Kurulacak: ${pkgs[*]}"
@@ -962,6 +968,452 @@ disconnect_all() {
   pause
 }
 
+save_pc() {
+  echo "$1" >"$PC_CONFIG"
+}
+
+load_pc() {
+  [[ -f "$PC_CONFIG" ]] && cat "$PC_CONFIG"
+}
+
+save_pc_mac() {
+  echo "$1" >"$PC_MAC_CONFIG"
+}
+
+load_pc_mac() {
+  [[ -f "$PC_MAC_CONFIG" ]] && cat "$PC_MAC_CONFIG"
+}
+
+save_pc_user() {
+  echo "$1" >"$PC_USER_CONFIG"
+}
+
+load_pc_user() {
+  if [[ -f "$PC_USER_CONFIG" ]]; then
+    cat "$PC_USER_CONFIG"
+  else
+    echo "Administrator"
+  fi
+}
+
+current_pc() {
+  local ip mac
+  ip=$(load_pc)
+  mac=$(load_pc_mac)
+  if [[ -n "${ip:-}" ]]; then
+    if [[ -n "${mac:-}" ]]; then
+      echo "${ip} (MAC: ${mac})"
+    else
+      echo "$ip"
+    fi
+  else
+    echo "(kayıtlı yok)"
+  fi
+}
+
+ensure_pc() {
+  PC_IP=$(load_pc)
+  if [[ -z "${PC_IP:-}" ]]; then
+    red "Önce PC IP kaydet (PC menüsü → 1)."
+    return 1
+  fi
+  PC_MAC=$(load_pc_mac)
+  PC_USER=$(load_pc_user)
+  return 0
+}
+
+pc_set_target() {
+  local ip mac user
+  read -r -p "PC IP adresi: " ip
+  ip="${ip//[[:space:]]/}"
+  [[ -z "$ip" ]] && { red "IP boş olamaz."; pause; return; }
+  read -r -p "MAC (Wake-on-LAN, boş bırakılabilir): " mac
+  mac="${mac//[[:space:]]/}"
+  read -r -p "SSH kullanıcı [Administrator]: " user
+  user=${user:-Administrator}
+  save_pc "$ip"
+  [[ -n "$mac" ]] && save_pc_mac "$mac" || rm -f "$PC_MAC_CONFIG"
+  save_pc_user "$user"
+  green "PC kaydedildi: $ip"
+  pause
+}
+
+pc_ping() {
+  ensure_pc || { pause; return; }
+  cyan "Ping: $PC_IP"
+  if ping -c 4 -W 2 "$PC_IP" 2>/dev/null; then
+    green "PC yanıt veriyor."
+  else
+    yellow "Ping yok (kapalı, firewall veya ICMP kapalı olabilir)."
+  fi
+  pause
+}
+
+pc_probe_port() {
+  local ip="$1" port="$2" label="$3"
+  if nc -z -w 2 "$ip" "$port" 2>/dev/null; then
+    green "  [AÇIK]  $label ($port)"
+    return 0
+  fi
+  echo "  [kapalı] $label ($port)"
+  return 1
+}
+
+pc_scan_services() {
+  ensure_pc || { pause; return; }
+  cyan "Servis taraması: $PC_IP"
+  echo
+  pc_probe_port "$PC_IP" 22   "SSH"
+  pc_probe_port "$PC_IP" 445  "SMB (dosya paylaşımı)"
+  pc_probe_port "$PC_IP" 3389 "RDP (uzaktan masaüstü)"
+  pc_probe_port "$PC_IP" 5985 "WinRM (PowerShell uzaktan)"
+  pc_probe_port "$PC_IP" 80   "HTTP"
+  pc_probe_port "$PC_IP" 135  "RPC (Windows)"
+  echo
+  yellow "Açık port = o yöntemle uzaktan işlem yapılabilir."
+  pause
+}
+
+pc_scan_network() {
+  local subnet ip
+  subnet=$(get_subnet)
+  cyan "Ağdaki PC adayları taranıyor: $subnet"
+  yellow "SSH(22), RDP(3389), SMB(445) açık olanlar listelenir..."
+  echo
+
+  if need_cmd nmap; then
+    nmap -p 22,445,3389,5985 --open -n "$subnet" 2>/dev/null \
+      | awk '/Nmap scan report/{ip=$NF} /\/tcp open/{print ip, $0}' \
+      | sed 's/()//g'
+  else
+    local base i
+    base=$(cut -d. -f1-3 <<<"${subnet%%/*}")
+    for i in $(seq 1 254); do
+      ip="${base}.$i"
+      for port in 22 445 3389; do
+        if nc -z -w 1 "$ip" "$port" 2>/dev/null; then
+          echo "  $ip:$port açık"
+        fi
+      done
+    done
+  fi
+  echo
+  read -r -p "Kaydetmek için IP (boş=atla): " ip
+  ip="${ip//[[:space:]]/}"
+  [[ -n "$ip" ]] && { save_pc "$ip"; green "Kaydedildi: $ip"; }
+  pause
+}
+
+pc_wol_send() {
+  local mac="$1"
+  local mac_clean
+  mac_clean=$(echo "$mac" | tr -d ':-' | tr '[:upper:]' '[:lower:]')
+  if [[ ${#mac_clean} -ne 12 ]]; then
+    red "Geçersiz MAC."
+    return 1
+  fi
+
+  if need_cmd wakeonlan; then
+    wakeonlan "$mac" && return 0
+  fi
+
+  if need_cmd python; then
+    python - <<PY
+import socket
+mac = "${mac_clean}"
+data = b"\\xff" * 6 + bytes.fromhex(mac) * 16
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+s.sendto(data, ("255.255.255.255", 9))
+PY
+    return $?
+  fi
+
+  red "wakeonlan veya python gerekli (pkg install wakeonlan)."
+  return 1
+}
+
+pc_wake() {
+  ensure_pc || { pause; return; }
+  if [[ -z "${PC_MAC:-}" ]]; then
+    read -r -p "MAC adresi: " PC_MAC
+    PC_MAC="${PC_MAC//[[:space:]]/}"
+    [[ -z "$PC_MAC" ]] && { red "MAC gerekli."; pause; return; }
+    save_pc_mac "$PC_MAC"
+  fi
+  cyan "Wake-on-LAN gönderiliyor: $PC_MAC -> $PC_IP"
+  if pc_wol_send "$PC_MAC"; then
+    green "Magic packet gönderildi. PC birkaç saniye içinde açılabilir."
+    yellow "Not: BIOS'ta WOL + ağ kartında WOL açık olmalı."
+  else
+    red "Gönderilemedi. netcat/wakeonlan kontrol et."
+  fi
+  pause
+}
+
+pc_ssh_target() {
+  echo "${PC_USER}@${PC_IP}"
+}
+
+pc_ssh_available() {
+  ensure_pc || return 1
+  nc -z -w 2 "$PC_IP" 22 2>/dev/null
+}
+
+pc_run_ssh() {
+  local cmd="$1"
+  ensure_pc || return 1
+  if ! pc_ssh_available; then
+    red "SSH (22) kapalı veya erişilemiyor."
+    yellow "PC menüsü → 12 ile Windows'ta OpenSSH açma ipuçlarına bak."
+    return 1
+  fi
+  ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "$(pc_ssh_target)" "$cmd"
+}
+
+pc_shell() {
+  ensure_pc || { pause; return; }
+  if ! pc_ssh_available; then
+    red "SSH kapalı."
+    pause
+    return
+  fi
+  green "SSH shell (çıkış: exit)"
+  ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "$(pc_ssh_target)"
+}
+
+pc_run_cmd() {
+  ensure_pc || { pause; return; }
+  local cmd
+  read -r -p "Çalıştırılacak komut: " cmd
+  [[ -z "$cmd" ]] && return
+  pc_run_ssh "$cmd"
+  pause
+}
+
+pc_open_url() {
+  ensure_pc || { pause; return; }
+  local url
+  read -r -p "Açılacak URL: " url
+  url=$(normalize_url "$url")
+  [[ -z "$url" ]] && { red "URL boş."; pause; return; }
+  cyan "PC'de açılıyor: $url"
+  pc_run_ssh "cmd.exe /c start \"\" \"$url\"" 2>/dev/null \
+    || pc_run_ssh "powershell -NoProfile -Command \"Start-Process '$url'\"" 2>/dev/null \
+    || pc_run_ssh "xdg-open '$url' 2>/dev/null || sensible-browser '$url'"
+  pause
+}
+
+pc_push_file() {
+  ensure_pc || { pause; return; }
+  local src dst
+  read -r -p "Termux dosya yolu: " src
+  read -r -p "PC hedef (örn: Desktop/dosya.txt): " dst
+  [[ -z "$src" || ! -f "$src" ]] && { red "Dosya yok."; pause; return; }
+  [[ -z "$dst" ]] && dst=$(basename "$src")
+  if ! pc_ssh_available; then
+    red "SSH kapalı; scp kullanılamaz."
+    pause
+    return
+  fi
+  scp -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new "$src" "$(pc_ssh_target):$dst"
+  pause
+}
+
+pc_reboot() {
+  ensure_pc || { pause; return; }
+  read -r -p "PC yeniden başlatılsın mı? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
+  pc_run_ssh "shutdown /r /t 5 /c \"Termux tv-adb reboot\"" 2>/dev/null \
+    || pc_run_ssh "sudo reboot" 2>/dev/null \
+    || pc_run_ssh "reboot"
+  yellow "Reboot komutu gönderildi."
+  pause
+}
+
+pc_shutdown() {
+  ensure_pc || { pause; return; }
+  read -r -p "PC kapatılsın mı? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
+  pc_run_ssh "shutdown /s /t 5 /c \"Termux tv-adb shutdown\"" 2>/dev/null \
+    || pc_run_ssh "sudo shutdown -h now" 2>/dev/null \
+    || pc_run_ssh "poweroff"
+  yellow "Kapatma komutu gönderildi."
+  pause
+}
+
+pc_smb_list() {
+  ensure_pc || { pause; return; }
+  if ! nc -z -w 2 "$PC_IP" 445 2>/dev/null; then
+    red "SMB (445) kapalı veya erişilemiyor."
+    pause
+    return
+  fi
+  local user pass
+  read -r -p "Kullanıcı (boş=misafir dene): " user
+  if [[ -n "$user" ]]; then
+    read -r -s -p "Parola: " pass
+    echo
+    smbclient -L "//$PC_IP" -U "$user%$pass" 2>/dev/null \
+      || smbclient -L "//$PC_IP" -U "$user" 2>/dev/null
+  else
+    smbclient -L "//$PC_IP" -N 2>/dev/null
+  fi
+  pause
+}
+
+pc_smb_push() {
+  ensure_pc || { pause; return; }
+  if ! nc -z -w 2 "$PC_IP" 445 2>/dev/null; then
+    red "SMB (445) kapalı."
+    pause
+    return
+  fi
+  local src share remote user pass
+  read -r -p "Termux dosya yolu: " src
+  read -r -p "Paylaşım adı (örn: Public): " share
+  read -r -p "Uzak dosya adı [$(basename "${src:-file}")]: " remote
+  remote=${remote:-$(basename "$src")}
+  [[ -z "$src" || ! -f "$src" || -z "$share" ]] && { red "Dosya/paylaşım gerekli."; pause; return; }
+  read -r -p "Kullanıcı (boş=misafir): " user
+  if [[ -n "$user" ]]; then
+    read -r -s -p "Parola: " pass
+    echo
+    smbclient "//$PC_IP/$share" -U "$user%$pass" -c "put \"$src\" \"$remote\"" 2>/dev/null
+  else
+    smbclient "//$PC_IP/$share" -N -c "put \"$src\" \"$remote\"" 2>/dev/null
+  fi
+  pause
+}
+
+pc_http_ping() {
+  ensure_pc || { pause; return; }
+  local path
+  read -r -p "HTTP yol [/]: " path
+  path=${path:-/}
+  cyan "GET http://${PC_IP}${path}"
+  if need_cmd curl; then
+    curl -sS -m 8 -I "http://${PC_IP}${path}" || red "HTTP yanıt yok."
+  elif need_cmd wget; then
+    wget -S -O /dev/null -T 8 "http://${PC_IP}${path}" 2>&1 | head -n 15
+  else
+    red "curl/wget yok. pkg install curl"
+  fi
+  pause
+}
+
+pc_hosts_hint() {
+  cat <<'EOF'
+
+PC'de domain yönlendirme (Windows, yönetici Notepad):
+  C:\Windows\System32\drivers\etc\hosts
+
+Satır ekle:
+  192.168.1.50  ornek.com
+
+Linux/macOS:
+  /etc/hosts
+
+SSH açıksa uzaktan (Windows PowerShell yönetici):
+  Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "192.168.1.50 ornek.com"
+
+EOF
+  pause
+}
+
+pc_enable_hint() {
+  cat <<'EOF'
+
+Windows PC'de uzaktan erişim açma (kendi PC'n):
+
+1) OpenSSH Server (PowerShell yönetici):
+   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+   Start-Service sshd
+   Set-Service -Name sshd -StartupType Automatic
+   New-NetFirewallRule -Name sshd -DisplayName "OpenSSH Server (sshd)" `
+     -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+
+2) Uzaktan Masaüstü (RDP):
+   Sistem → Uzaktan → Uzaktan Masaüstü'ne izin ver
+   (Termux'tan RDP istemcisi ile bağlan: pkg install freerdp)
+
+3) Dosya paylaşımı (SMB):
+   Klasör → Özellikler → Paylaşım → Ağ üzerinden paylaş
+   Gelişmiş paylaşım + izin ver
+
+4) Wake-on-LAN:
+   BIOS: Wake on LAN açık
+   Aygıt Yöneticisi → Ağ kartı → Güç yönetimi →
+   "Bu aygıtın bilgisayarı uyandırmasına izin ver"
+
+OpenSSH yokken bu menüden yapılabilenler:
+  - Wake-on-LAN (MAC kayıtlıysa)
+  - Ping / port tarama
+  - Ağ taraması (RDP/SMB/SSH açık PC bul)
+  - SMB açıksa dosya gönder (parola/paylaşım gerekir)
+
+EOF
+  pause
+}
+
+pc_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    cyan "======================================"
+    cyan "   Termux → PC Menüsü"
+    cyan "======================================"
+    echo " Kayıtlı PC : $(current_pc)"
+    echo " SSH user   : $(load_pc_user)"
+    echo " Algılanan ağ: $(get_subnet)"
+    echo
+    echo " --- OpenSSH gerekmez ---"
+    echo " 1) PC IP / MAC kaydet"
+    echo " 2) Ping at"
+    echo " 3) PC servis taraması (22/445/3389...)"
+    echo " 4) Ağı tara (PC adayları)"
+    echo " 5) Wake-on-LAN (uyandır)"
+    echo " 6) HTTP başlık isteği (curl)"
+    echo " 7) hosts dosyası ipuçları"
+    echo
+    echo " --- SSH açıksa ---"
+    echo " 8) SSH shell"
+    echo " 9) Uzaktan komut çalıştır"
+    echo "10) URL aç (tarayıcı)"
+    echo "11) Dosya gönder (scp)"
+    echo "12) Yeniden başlat"
+    echo "13) Kapat"
+    echo
+    echo " --- SMB (445) açıksa ---"
+    echo "14) Paylaşımları listele"
+    echo "15) Dosya gönder (smb)"
+    echo
+    echo "16) Windows'ta SSH/RDP/SMB açma ipuçları"
+    echo " 0) Ana menüye dön"
+    echo
+    read -r -p "Seçim: " p
+    case "$p" in
+      1) pc_set_target ;;
+      2) pc_ping ;;
+      3) pc_scan_services ;;
+      4) pc_scan_network ;;
+      5) pc_wake ;;
+      6) pc_http_ping ;;
+      7) pc_hosts_hint ;;
+      8) pc_shell ;;
+      9) pc_run_cmd ;;
+      10) pc_open_url ;;
+      11) pc_push_file ;;
+      12) pc_reboot ;;
+      13) pc_shutdown ;;
+      14) pc_smb_list ;;
+      15) pc_smb_push ;;
+      16) pc_enable_hint ;;
+      0) return ;;
+      *) red "Geçersiz seçim."; sleep 1 ;;
+    esac
+  done
+}
+
 main_menu() {
   while true; do
     clear 2>/dev/null || true
@@ -1000,6 +1452,7 @@ main_menu() {
     echo "27) Yeniden başlat (reboot)"
     echo "28) TV'de TCP ADB açma ipuçları"
     echo "29) Bağlantıyı kes"
+    echo "30) PC menüsü (SSH/RDP/SMB/WOL)"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -1033,6 +1486,7 @@ main_menu() {
       27) reboot_device ;;
       28) enable_tcp_hint ;;
       29) disconnect_all ;;
+      30) pc_menu ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
