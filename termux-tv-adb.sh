@@ -1104,6 +1104,148 @@ pc_scan_network() {
   pause
 }
 
+# ARP tablosundan IP -> MAC
+lookup_mac() {
+  local ip="$1" mac=""
+  if need_cmd ip; then
+    mac=$(ip neigh show "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print $(i+1); exit}}')
+  fi
+  if [[ -z "$mac" || "$mac" == "FAILED" || "$mac" == "INCOMPLETE" ]]; then
+    mac=$(awk -v ip="$ip" 'NR>1 && $1==ip {print $4; exit}' /proc/net/arp 2>/dev/null)
+  fi
+  if [[ -z "$mac" || "$mac" == "00:00:00:00:00:00" ]]; then
+    echo "-"
+  else
+    echo "$mac" | tr '[:upper:]' '[:lower:]'
+  fi
+}
+
+ping_sweep() {
+  local subnet="$1" base i
+  base=$(cut -d. -f1-3 <<<"${subnet%%/*}")
+  for i in $(seq 1 254); do
+    ping -c 1 -W 1 "${base}.$i" >/dev/null 2>&1 &
+    if (( i % 50 == 0 )); then wait; fi
+  done
+  wait
+  sleep 1
+}
+
+scan_all_devices() {
+  local subnet out_file ip mac count choice line
+  subnet=$(get_subnet)
+  out_file="${CONFIG_DIR}/last_lan_scan.txt"
+  mkdir -p "$CONFIG_DIR"
+  : >"$out_file"
+
+  cyan "Tüm ağ taranıyor: $subnet"
+  yellow "IP + MAC listelenir (1–2 dk sürebilir)..."
+  echo
+
+  # 1) Hostları bul (nmap tercih)
+  local hosts=()
+  declare -A macmap=()
+
+  if need_cmd nmap; then
+    local cur_ip=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ Nmap\ scan\ report\ for\ ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+        cur_ip="${BASH_REMATCH[1]}"
+        hosts+=("$cur_ip")
+      elif [[ "$line" =~ MAC\ Address:\ ([0-9A-Fa-f:]{17})(.*) ]]; then
+        if [[ -n "$cur_ip" ]]; then
+          macmap["$cur_ip"]=$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
+        fi
+      fi
+    done < <(nmap -sn -n "$subnet" 2>/dev/null)
+  fi
+
+  # 2) nmap az bulduysa / yoksa ping + ARP
+  if ((${#hosts[@]} < 2)); then
+    yellow "Ping taraması + ARP tablosu kullanılıyor..."
+    ping_sweep "$subnet"
+  else
+    # MAC'leri doldurmak için kısa ping (ARP öğrenimi)
+    for ip in "${hosts[@]}"; do
+      ping -c 1 -W 1 "$ip" >/dev/null 2>&1 &
+    done
+    wait
+    sleep 1
+  fi
+
+  # ARP'taki herkesi de ekle
+  while IFS= read -r ip; do
+    [[ -z "$ip" ]] && continue
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    local found=0
+    for h in "${hosts[@]:-}"; do
+      [[ "$h" == "$ip" ]] && { found=1; break; }
+    done
+    ((found)) || hosts+=("$ip")
+  done < <(
+    {
+      ip neigh show 2>/dev/null | awk '{print $1}'
+      awk 'NR>1 && $4 != "00:00:00:00:00:00" {print $1}' /proc/net/arp 2>/dev/null
+    } | sort -u -t. -k1,1n -k2,2n -k3,3n -k4,4n
+  )
+
+  # Sırala
+  if ((${#hosts[@]})); then
+    mapfile -t hosts < <(printf '%s\n' "${hosts[@]}" | sort -u -t. -k1,1n -k2,2n -k3,3n -k4,4n)
+  fi
+
+  printf "%-4s %-16s %-20s\n" "#" "IP" "MAC"
+  printf "%-4s %-16s %-20s\n" "----" "---------------" "-------------------"
+
+  count=0
+  for ip in "${hosts[@]:-}"; do
+    mac="${macmap[$ip]:-}"
+    [[ -z "$mac" ]] && mac=$(lookup_mac "$ip")
+    count=$((count + 1))
+    printf "%-4s %-16s %-20s\n" "$count" "$ip" "$mac"
+    echo "$ip|$mac" >>"$out_file"
+  done
+
+  echo
+  if [[ $count -eq 0 ]]; then
+    red "Cihaz bulunamadı."
+    yellow "Aynı Wi-Fi'de misin? Menü 1 ile nmap kur."
+    pause
+    return
+  fi
+
+  green "Toplam: $count cihaz"
+  yellow "Liste kaydı: $out_file"
+  echo
+  read -r -p "PC olarak kaydet (# veya IP, boş=atla): " choice
+  choice="${choice//[[:space:]]/}"
+  [[ -z "$choice" ]] && { pause; return; }
+
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    line=$(sed -n "${choice}p" "$out_file")
+    ip="${line%%|*}"
+    mac="${line##*|}"
+  else
+    ip="$choice"
+    mac=$(awk -F'|' -v ip="$ip" '$1==ip{print $2; exit}' "$out_file")
+    mac=${mac:-$(lookup_mac "$ip")}
+  fi
+
+  if [[ -z "$ip" ]]; then
+    red "Geçersiz seçim."
+    pause
+    return
+  fi
+  save_pc "$ip"
+  if [[ -n "$mac" && "$mac" != "-" ]]; then
+    save_pc_mac "$mac"
+    green "Kaydedildi: $ip ($mac)"
+  else
+    green "Kaydedildi: $ip"
+  fi
+  pause
+}
+
 pc_wol_send() {
   local mac="$1"
   local mac_clean
@@ -1371,23 +1513,24 @@ pc_menu() {
     echo " 2) Ping at"
     echo " 3) PC servis taraması (22/445/3389...)"
     echo " 4) Ağı tara (PC adayları)"
-    echo " 5) Wake-on-LAN (uyandır)"
-    echo " 6) HTTP başlık isteği (curl)"
-    echo " 7) hosts dosyası ipuçları"
+    echo " 5) Tüm ağı ara (IP + MAC listesi)"
+    echo " 6) Wake-on-LAN (uyandır)"
+    echo " 7) HTTP başlık isteği (curl)"
+    echo " 8) hosts dosyası ipuçları"
     echo
     echo " --- SSH açıksa ---"
-    echo " 8) SSH shell"
-    echo " 9) Uzaktan komut çalıştır"
-    echo "10) URL aç (tarayıcı)"
-    echo "11) Dosya gönder (scp)"
-    echo "12) Yeniden başlat"
-    echo "13) Kapat"
+    echo " 9) SSH shell"
+    echo "10) Uzaktan komut çalıştır"
+    echo "11) URL aç (tarayıcı)"
+    echo "12) Dosya gönder (scp)"
+    echo "13) Yeniden başlat"
+    echo "14) Kapat"
     echo
     echo " --- SMB (445) açıksa ---"
-    echo "14) Paylaşımları listele"
-    echo "15) Dosya gönder (smb)"
+    echo "15) Paylaşımları listele"
+    echo "16) Dosya gönder (smb)"
     echo
-    echo "16) Windows'ta SSH/RDP/SMB açma ipuçları"
+    echo "17) Windows'ta SSH/RDP/SMB açma ipuçları"
     echo " 0) Ana menüye dön"
     echo
     read -r -p "Seçim: " p
@@ -1396,18 +1539,19 @@ pc_menu() {
       2) pc_ping ;;
       3) pc_scan_services ;;
       4) pc_scan_network ;;
-      5) pc_wake ;;
-      6) pc_http_ping ;;
-      7) pc_hosts_hint ;;
-      8) pc_shell ;;
-      9) pc_run_cmd ;;
-      10) pc_open_url ;;
-      11) pc_push_file ;;
-      12) pc_reboot ;;
-      13) pc_shutdown ;;
-      14) pc_smb_list ;;
-      15) pc_smb_push ;;
-      16) pc_enable_hint ;;
+      5) scan_all_devices ;;
+      6) pc_wake ;;
+      7) pc_http_ping ;;
+      8) pc_hosts_hint ;;
+      9) pc_shell ;;
+      10) pc_run_cmd ;;
+      11) pc_open_url ;;
+      12) pc_push_file ;;
+      13) pc_reboot ;;
+      14) pc_shutdown ;;
+      15) pc_smb_list ;;
+      16) pc_smb_push ;;
+      17) pc_enable_hint ;;
       0) return ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
@@ -1453,6 +1597,7 @@ main_menu() {
     echo "28) TV'de TCP ADB açma ipuçları"
     echo "29) Bağlantıyı kes"
     echo "30) PC menüsü (SSH/RDP/SMB/WOL)"
+    echo "31) Tüm ağı ara (IP + MAC)"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -1487,6 +1632,7 @@ main_menu() {
       28) enable_tcp_hint ;;
       29) disconnect_all ;;
       30) pc_menu ;;
+      31) scan_all_devices ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
