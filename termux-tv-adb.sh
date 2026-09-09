@@ -1,3 +1,4 @@
+
 #!/data/data/com.termux/files/usr/bin/bash
 # Termux → TV Box ADB menü betiği
 # Kullanım: bash termux-tv-adb.sh
@@ -227,6 +228,163 @@ push_file() {
   dst=${dst:-/sdcard/}
   [[ -z "$src" || ! -f "$src" ]] && { red "Dosya yok."; pause; return; }
   adb -s "$TARGET" push "$src" "$dst"
+  pause
+}
+
+normalize_url() {
+  local url="$1"
+  url="${url//[[:space:]]/}"
+  [[ -z "$url" ]] && { echo ""; return; }
+  if [[ "$url" != http://* && "$url" != https://* && "$url" != file://* && "$url" != intent:* ]]; then
+    url="https://${url}"
+  fi
+  echo "$url"
+}
+
+open_url() {
+  ensure_target || { pause; return; }
+  local url pkg
+  echo
+  read -r -p "Açılacak URL: " url
+  url=$(normalize_url "$url")
+  [[ -z "$url" ]] && { red "URL boş olamaz."; pause; return; }
+
+  read -r -p "Paket (boş=otomatik seçim): " pkg
+  cyan "TV'de açılıyor: $url"
+
+  if [[ -n "${pkg:-}" ]]; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" "$pkg" >/dev/null 2>&1
+  elif adb -s "$TARGET" shell pm path com.android.chrome >/dev/null 2>&1; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" com.android.chrome >/dev/null 2>&1
+  elif adb -s "$TARGET" shell pm path com.android.browser >/dev/null 2>&1; then
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" com.android.browser >/dev/null 2>&1
+  else
+    adb -s "$TARGET" shell am start -a android.intent.action.VIEW -d "$url" >/dev/null 2>&1
+  fi
+
+  if [[ $? -eq 0 ]]; then
+    green "URL açma komutu gönderildi."
+  else
+    red "Açılamadı. Tarayıcı / uygun uygulama kurulu mu?"
+  fi
+  pause
+}
+
+show_proxy() {
+  ensure_target || { pause; return; }
+  local cur
+  cur=$(adb -s "$TARGET" shell settings get global http_proxy 2>/dev/null | tr -d '\r')
+  cyan "Mevcut http_proxy: ${cur:-"(yok / null)"}"
+  pause
+}
+
+set_proxy() {
+  ensure_target || { pause; return; }
+  local host port value
+  echo
+  yellow "Not: Global HTTP proxy; HTTPS uygulamaları bazen yok sayar."
+  yellow "ADB Wi-Fi üzerindenyse yanlış proxy bağlantıyı bozabilir."
+  read -r -p "Proxy host (IP veya domain): " host
+  read -r -p "Port [8080]: " port
+  port=${port:-8080}
+  host="${host//[[:space:]]/}"
+  [[ -z "$host" ]] && { red "Host boş olamaz."; pause; return; }
+  if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    red "Port sayı olmalı."
+    pause
+    return
+  fi
+  value="${host}:${port}"
+  cyan "Proxy ayarlanıyor: $value"
+  if adb -s "$TARGET" shell settings put global http_proxy "$value" >/dev/null 2>&1; then
+    green "http_proxy = $value"
+  else
+    red "Ayarlanamadı."
+  fi
+  pause
+}
+
+clear_proxy() {
+  ensure_target || { pause; return; }
+  cyan "Proxy temizleniyor..."
+  if adb -s "$TARGET" shell settings put global http_proxy :0 >/dev/null 2>&1 \
+    || adb -s "$TARGET" shell settings delete global http_proxy >/dev/null 2>&1; then
+    green "Proxy kapatıldı (:0 / silindi)."
+  else
+    red "Temizlenemedi."
+  fi
+  pause
+}
+
+hosts_redirect() {
+  ensure_target || { pause; return; }
+  local domain ip
+  echo
+  yellow "Root gerekir. /system/etc/hosts değiştirilir (yedek alınır)."
+  yellow "Sadece kendi test cihazında kullan."
+  read -r -p "Yönlenecek domain (örn: ornek.com): " domain
+  read -r -p "Hedef IP: " ip
+  domain="${domain//[[:space:]]/}"
+  ip="${ip//[[:space:]]/}"
+  domain="${domain#http://}"
+  domain="${domain#https://}"
+  domain="${domain%%/*}"
+  [[ -z "$domain" || -z "$ip" ]] && { red "Domain ve IP gerekli."; pause; return; }
+
+  cyan "hosts güncelleniyor: $domain -> $ip"
+  adb -s "$TARGET" shell su -c "
+set -e
+HOSTS=/system/etc/hosts
+remount_rw() {
+  mount -o rw,remount /system 2>/dev/null || true
+  mount -o rw,remount / 2>/dev/null || true
+}
+remount_rw
+if [ ! -f \"\${HOSTS}.tvadb.bak\" ]; then
+  cp \"\$HOSTS\" \"\${HOSTS}.tvadb.bak\" || true
+fi
+grep -v \"[[:space:]]${domain}\$\" \"\$HOSTS\" > /data/local/tmp/hosts.tvadb 2>/dev/null || cp \"\$HOSTS\" /data/local/tmp/hosts.tvadb
+echo \"${ip} ${domain}\" >> /data/local/tmp/hosts.tvadb
+cp /data/local/tmp/hosts.tvadb \"\$HOSTS\"
+echo OK
+" > /tmp/tvadb-hosts-out.txt 2>&1
+  local rc=$?
+  cat /tmp/tvadb-hosts-out.txt 2>/dev/null || true
+  if [[ $rc -eq 0 ]] && grep -q OK /tmp/tvadb-hosts-out.txt 2>/dev/null; then
+    green "Yönlendirme yazıldı. DNS önbelleği için uygulamayı yeniden aç."
+  else
+    red "Başarısız (root / remount?)."
+  fi
+  pause
+}
+
+hosts_restore() {
+  ensure_target || { pause; return; }
+  yellow "hosts yedeği geri yüklenecek."
+  read -r -p "Onaylıyor musun? [e/H]: " a
+  [[ "$a" =~ ^[eEyY]$ ]] || return
+
+  adb -s "$TARGET" shell su -c '
+set -e
+HOSTS=/system/etc/hosts
+BAK=${HOSTS}.tvadb.bak
+remount_rw() {
+  mount -o rw,remount /system 2>/dev/null || true
+  mount -o rw,remount / 2>/dev/null || true
+}
+remount_rw
+[ -f "$BAK" ] || { echo NO_BAK; exit 2; }
+cp "$BAK" "$HOSTS"
+rm -f "$BAK"
+echo OK
+' > /tmp/tvadb-hosts-restore.txt 2>&1
+  local rc=$?
+  cat /tmp/tvadb-hosts-restore.txt 2>/dev/null || true
+  if [[ $rc -eq 0 ]] && grep -q OK /tmp/tvadb-hosts-restore.txt 2>/dev/null; then
+    green "hosts geri yüklendi."
+  else
+    red "Yedek yok veya geri yükleme başarısız."
+  fi
   pause
 }
 
@@ -824,18 +982,24 @@ main_menu() {
     echo " 9) APK yükle"
     echo "10) Dosya gönder (push)"
     echo "11) YouTube linki oynat"
-    echo "12) Ses: mute"
-    echo "13) Ses: tam ses"
-    echo "14) Arka planda ses çal"
-    echo "15) Sesi / medyayı durdur"
-    echo "16) Ters kumanda AÇ (fiziksel, root)"
-    echo "17) Ters kumanda KAPAT (geri al)"
-    echo "18) Saka / test eglence menusu"
-    echo "19) Wi-Fi kapat"
-    echo "20) Wi-Fi ac"
-    echo "21) Yeniden başlat (reboot)"
-    echo "22) TV'de TCP ADB açma ipuçları"
-    echo "23) Bağlantıyı kes"
+    echo "12) Herhangi bir URL aç"
+    echo "13) Proxy durumunu göster"
+    echo "14) HTTP proxy ayarla"
+    echo "15) HTTP proxy kapat"
+    echo "16) Domain yönlendir (hosts, root)"
+    echo "17) hosts yedeğini geri al (root)"
+    echo "18) Ses: mute"
+    echo "19) Ses: tam ses"
+    echo "20) Arka planda ses çal"
+    echo "21) Sesi / medyayı durdur"
+    echo "22) Ters kumanda AÇ (fiziksel, root)"
+    echo "23) Ters kumanda KAPAT (geri al)"
+    echo "24) Saka / test eglence menusu"
+    echo "25) Wi-Fi kapat"
+    echo "26) Wi-Fi ac"
+    echo "27) Yeniden başlat (reboot)"
+    echo "28) TV'de TCP ADB açma ipuçları"
+    echo "29) Bağlantıyı kes"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -851,18 +1015,24 @@ main_menu() {
       9) install_apk ;;
       10) push_file ;;
       11) play_youtube ;;
-      12) volume_mute ;;
-      13) volume_max ;;
-      14) play_audio_bg ;;
-      15) stop_audio ;;
-      16) reverse_remote_apply ;;
-      17) reverse_remote_restore ;;
-      18) prank_menu ;;
-      19) wifi_disable; pause ;;
-      20) wifi_enable; pause ;;
-      21) reboot_device ;;
-      22) enable_tcp_hint ;;
-      23) disconnect_all ;;
+      12) open_url ;;
+      13) show_proxy ;;
+      14) set_proxy ;;
+      15) clear_proxy ;;
+      16) hosts_redirect ;;
+      17) hosts_restore ;;
+      18) volume_mute ;;
+      19) volume_max ;;
+      20) play_audio_bg ;;
+      21) stop_audio ;;
+      22) reverse_remote_apply ;;
+      23) reverse_remote_restore ;;
+      24) prank_menu ;;
+      25) wifi_disable; pause ;;
+      26) wifi_enable; pause ;;
+      27) reboot_device ;;
+      28) enable_tcp_hint ;;
+      29) disconnect_all ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
