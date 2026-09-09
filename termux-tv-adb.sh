@@ -9,6 +9,8 @@ CONFIG_FILE="${CONFIG_DIR}/last_device"
 PC_CONFIG="${CONFIG_DIR}/last_pc"
 PC_MAC_CONFIG="${CONFIG_DIR}/last_pc_mac"
 PC_USER_CONFIG="${CONFIG_DIR}/last_pc_user"
+OVERLAY_APK_CONFIG="${CONFIG_DIR}/overlay_apk"
+OVERLAY_PKG="com.xd.xd"
 DEFAULT_PORT=5555
 
 mkdir -p "$CONFIG_DIR"
@@ -560,6 +562,201 @@ stop_audio() {
   pause
 }
 
+script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  cd "$(dirname "$src")" && pwd
+}
+
+find_overlay_apk() {
+  local dir c
+  dir=$(script_dir)
+  if [[ -n "${OVERLAY_APK:-}" && -f "$OVERLAY_APK" ]]; then
+    echo "$OVERLAY_APK"
+    return 0
+  fi
+  if [[ -f "$OVERLAY_APK_CONFIG" ]]; then
+    c=$(cat "$OVERLAY_APK_CONFIG")
+    if [[ -n "$c" && -f "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  fi
+  for c in \
+    "$dir/xd-overlay.apk" \
+    "$dir/app-debug.apk" \
+    "$dir/app/build/outputs/apk/debug/app-debug.apk" \
+    "$HOME/xd-overlay.apk" \
+    "$CONFIG_DIR/xd-overlay.apk"
+  do
+    if [[ -f "$c" ]]; then
+      echo "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+grant_overlay_ops() {
+  adb -s "$TARGET" shell appops set "$OVERLAY_PKG" SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+  adb -s "$TARGET" shell cmd appops set "$OVERLAY_PKG" SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+  adb -s "$TARGET" shell pm grant "$OVERLAY_PKG" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  adb -s "$TARGET" shell pm grant "$OVERLAY_PKG" android.permission.READ_EXTERNAL_STORAGE >/dev/null 2>&1 || true
+  adb -s "$TARGET" shell pm grant "$OVERLAY_PKG" android.permission.READ_MEDIA_VIDEO >/dev/null 2>&1 || true
+  adb -s "$TARGET" shell appops set "$OVERLAY_PKG" POST_NOTIFICATIONS allow >/dev/null 2>&1 || true
+}
+
+overlay_volume_up() {
+  adb -s "$TARGET" shell media volume --stream 3 --set 15 >/dev/null 2>&1 || {
+    local i
+    for i in $(seq 1 20); do
+      adb -s "$TARGET" shell input keyevent 24 >/dev/null 2>&1
+    done
+  }
+}
+
+overlay_running() {
+  local out
+  out=$(adb -s "$TARGET" shell pidof "$OVERLAY_PKG" 2>/dev/null | tr -d '\r')
+  [[ -n "${out:-}" ]] && return 0
+  out=$(adb -s "$TARGET" shell "ps -A 2>/dev/null | grep -F $OVERLAY_PKG" 2>/dev/null | tr -d '\r')
+  [[ -n "${out:-}" ]] && return 0
+  return 1
+}
+
+overlay_log_finished() {
+  adb -s "$TARGET" logcat -d -t 200 -s XD_OVERLAY:V 2>/dev/null | grep -qE "VIDEO_DONE|VIDEO_ERROR"
+}
+
+silent_uninstall_overlay() {
+  adb -s "$TARGET" shell am force-stop "$OVERLAY_PKG" >/dev/null 2>&1 || true
+  adb -s "$TARGET" uninstall "$OVERLAY_PKG" >/dev/null 2>&1 || true
+}
+
+wait_overlay_done() {
+  local timeout_s="${1:-1800}"
+  local i
+  sleep 2
+  for ((i = 0; i < timeout_s; i++)); do
+    if overlay_log_finished; then
+      return 0
+    fi
+    if ((i >= 5)) && ! overlay_running; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+play_overlay_video() {
+  ensure_target || { pause; return; }
+  local apk src remote name mime url
+  apk=$(find_overlay_apk || true)
+  if [[ -z "${apk:-}" ]]; then
+    echo
+    yellow "Overlay APK bulunamadı. Termux'a kopyala (örn: ~/xd-overlay.apk)"
+    yellow "veya Android Studio ile app-debug.apk üret."
+    read -r -p "APK yolu: " apk
+    apk="${apk//[[:space:]]/}"
+    [[ -z "$apk" || ! -f "$apk" ]] && { red "APK yok."; pause; return; }
+    echo "$apk" >"$OVERLAY_APK_CONFIG"
+    green "APK yolu kaydedildi."
+  else
+    cyan "APK: $apk"
+  fi
+
+  echo
+  echo " 1) Termux'taki video dosyası (önerilen: mp4)"
+  echo " 2) URL (http/https)"
+  echo " 0) İptal"
+  read -r -p "Seçim: " src
+  url=""
+  remote=""
+  case "$src" in
+    1)
+      read -r -p "Video dosyası: " url
+      url="${url#"${url%%[![:space:]]*}"}"
+      url="${url%"${url##*[![:space:]]}"}"
+      [[ -z "$url" || ! -f "$url" ]] && { red "Dosya bulunamadı."; pause; return; }
+      name=$(basename "$url" | tr -c 'A-Za-z0-9._-' '_')
+      remote="/data/local/tmp/xd-overlay-${name}"
+      ;;
+    2)
+      read -r -p "Video URL: " url
+      url="${url#"${url%%[![:space:]]*}"}"
+      url="${url%"${url##*[![:space:]]}"}"
+      [[ -z "$url" ]] && { red "URL boş."; pause; return; }
+      [[ "$url" != http://* && "$url" != https://* ]] && url="https://${url}"
+      ;;
+    *) return ;;
+  esac
+
+  cyan "Sessiz kurulum..."
+  adb -s "$TARGET" shell input keyevent 224 >/dev/null 2>&1 || true
+  if ! adb -s "$TARGET" install -r -t -g "$apk" >/dev/null 2>&1; then
+    yellow "Yeniden kurulum deneniyor..."
+    silent_uninstall_overlay
+    if ! adb -s "$TARGET" install -r -t -g "$apk" >/dev/null 2>&1; then
+      red "APK kurulamadı."
+      pause
+      return
+    fi
+  fi
+  grant_overlay_ops
+  overlay_volume_up
+
+  if [[ -n "$remote" ]]; then
+    cyan "Video gönderiliyor..."
+    if ! adb -s "$TARGET" push "$url" "$remote" >/dev/null; then
+      red "Video gönderilemedi."
+      silent_uninstall_overlay
+      pause
+      return
+    fi
+    adb -s "$TARGET" shell chmod 644 "$remote" >/dev/null 2>&1 || true
+    url="$remote"
+  fi
+
+  adb -s "$TARGET" logcat -c >/dev/null 2>&1 || true
+  cyan "Overlay video başlatılıyor..."
+  local q=${url//\'/\'\\\'\'}
+  if ! adb -s "$TARGET" shell "am start -n ${OVERLAY_PKG}/.OverlayTrampolineActivity --es video '${q}'" >/dev/null 2>&1; then
+    yellow "Overlay servis açılamadı, tam ekran deneniyor..."
+    if ! adb -s "$TARGET" shell "am start -n ${OVERLAY_PKG}/.OverlayActivity --es video '${q}' --ez fallback true" >/dev/null 2>&1; then
+      red "Başlatılamadı."
+      silent_uninstall_overlay
+      [[ -n "${remote:-}" ]] && adb -s "$TARGET" shell rm -f "$remote" >/dev/null 2>&1 || true
+      pause
+      return
+    fi
+  fi
+
+  green "Oynuyor. Bitince uygulama sessizce silinecek."
+  yellow "İptal: Ctrl+C (yine silinir)."
+
+  local cleaned=0
+  finish_overlay() {
+    [[ "$cleaned" -eq 1 ]] && return
+    cleaned=1
+    cyan "Temizlik: durdur + sil..."
+    silent_uninstall_overlay
+    if [[ -n "${remote:-}" ]]; then
+      adb -s "$TARGET" shell rm -f "$remote" >/dev/null 2>&1 || true
+    fi
+  }
+  trap 'finish_overlay; trap - INT TERM; return' INT TERM
+
+  if wait_overlay_done 1800; then
+    green "Video bitti."
+  else
+    yellow "Süre doldu, yine de siliniyor."
+  fi
+  finish_overlay
+  trap - INT TERM
+  green "Uygulama kaldırıldı."
+  pause
+}
+
 # Fiziksel kumanda yönlerini keylayout üzerinden tersler (root + reboot gerekir)
 reverse_remote_apply() {
   ensure_target || { pause; return; }
@@ -881,6 +1078,7 @@ prank_menu() {
     echo "11) SURPRIZ PAKET (rastgele kombo)"
     echo "12) Wi-Fi KAPAT"
     echo "13) Wi-Fi AC"
+    echo "14) Ekranda overlay video (kur / oynat / sil)"
     echo " 0) Ana menuye don"
     echo
     read -r -p "Seçim: " p
@@ -898,6 +1096,7 @@ prank_menu() {
       11) prank_surprise; pause ;;
       12) wifi_disable; pause ;;
       13) wifi_enable; pause ;;
+      14) play_overlay_video ;;
       0) return ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
@@ -1597,7 +1796,7 @@ main_menu() {
     echo "28) TV'de TCP ADB açma ipuçları"
     echo "29) Bağlantıyı kes"
     echo "30) PC menüsü (SSH/RDP/SMB/WOL)"
-    echo "31) Tüm ağı ara (IP + MAC)"
+    echo "31) Ekranda overlay video (sessiz kur / oynat / sil)"
     echo " 0) Çıkış"
     echo
     read -r -p "Seçim: " sel
@@ -1632,7 +1831,7 @@ main_menu() {
       28) enable_tcp_hint ;;
       29) disconnect_all ;;
       30) pc_menu ;;
-      31) scan_all_devices ;;
+      31) play_overlay_video ;;
       0) green "Görüşürüz."; exit 0 ;;
       *) red "Geçersiz seçim."; sleep 1 ;;
     esac
