@@ -608,15 +608,6 @@ grant_overlay_ops() {
   adb -s "$TARGET" shell appops set "$OVERLAY_PKG" POST_NOTIFICATIONS allow >/dev/null 2>&1 || true
 }
 
-overlay_volume_up() {
-  adb -s "$TARGET" shell media volume --stream 3 --set 15 >/dev/null 2>&1 || {
-    local i
-    for i in $(seq 1 20); do
-      adb -s "$TARGET" shell input keyevent 24 >/dev/null 2>&1
-    done
-  }
-}
-
 overlay_running() {
   local out
   out=$(adb -s "$TARGET" shell pidof "$OVERLAY_PKG" 2>/dev/null | tr -d '\r')
@@ -815,7 +806,6 @@ play_overlay_video() {
   url="$OVERLAY_SRC_PATH"
   dur=$(ask_seconds "Video süresi (saniye, 0=bitene kadar)" "0")
   install_overlay_apk || { pause; return; }
-  overlay_volume_up
   resolve_overlay_media "video" "$url" || { silent_uninstall_overlay; pause; return; }
   url="$OVERLAY_RESOLVED_PATH"
   extras="--es mode video --es video '$(overlay_quote "$url")' --ei video_sec ${dur} --ei duration ${dur}"
@@ -835,7 +825,6 @@ play_overlay_audio() {
   url="$OVERLAY_SRC_PATH"
   dur=$(ask_seconds "Ses süresi (saniye, 0=parça bitene kadar)" "30")
   install_overlay_apk || { pause; return; }
-  overlay_volume_up
   resolve_overlay_media "audio" "$url" || { silent_uninstall_overlay; pause; return; }
   url="$OVERLAY_RESOLVED_PATH"
   extras="--es mode audio --es audio '$(overlay_quote "$url")' --ei audio_sec ${dur} --ei duration ${dur}"
@@ -876,7 +865,6 @@ play_overlay_image_audio() {
   audio="$OVERLAY_SRC_PATH"
   audio_sec=$(ask_seconds "Ses süresi (saniye, 0=parça bitene kadar)" "30")
   install_overlay_apk || { pause; return; }
-  overlay_volume_up
   resolve_overlay_media "image" "$image" || { silent_uninstall_overlay; pause; return; }
   image="$OVERLAY_RESOLVED_PATH"
   resolve_overlay_media "audio" "$audio" || { silent_uninstall_overlay; pause; return; }
